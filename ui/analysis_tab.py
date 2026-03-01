@@ -4,7 +4,7 @@ import os
 import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QMessageBox, QFrame
+    QPushButton, QTextEdit, QMessageBox, QFrame, QLabel
 )
 from PyQt6.QtCore import Qt
 
@@ -19,10 +19,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from core.spectral_analyzer import compute_psd, compute_band_powers
 from core.state_classifier import compute_state_indices, generate_conclusion
-from ui.widgets.state_card import StateCard
 
 
-# ── Цвета ритмов ──────────────────────────────────────────────────────────
+# ── Цвета и диапазоны ритмов ──────────────────────────────────────────────
 BAND_COLORS = {
     'Delta': '#4477CC',
     'Theta': '#9966CC',
@@ -31,7 +30,6 @@ BAND_COLORS = {
     'Gamma': '#CC4444',
 }
 
-# (название, нижняя граница, верхняя граница, цвет hex)
 BAND_REGIONS = [
     ('Delta', 0.5,  4.0),
     ('Theta', 4.0,  8.0),
@@ -70,29 +68,16 @@ class AnalysisTab(QWidget):
         # ── Графики: PSD слева, Pie справа ───────────────────────────────
         charts_row = QHBoxLayout()
         charts_row.setSpacing(12)
-
         charts_row.addWidget(self._build_psd_widget(), stretch=3)
         charts_row.addWidget(self._build_pie_widget(), stretch=2)
-
         root.addLayout(charts_row)
 
-        # ── Карточки состояния ────────────────────────────────────────────
-        cards_row = QHBoxLayout()
-        cards_row.setSpacing(12)
-
-        self.card_relax = StateCard("РАССЛАБЛЕНИЕ", color="#00D47E")
-        self.card_conc  = StateCard("КОНЦЕНТРАЦИЯ",  color="#FFA500")
-        self.card_drow  = StateCard("СОНЛИВОСТЬ",    color="#FF6B6B")
-
-        for card in (self.card_relax, self.card_conc, self.card_drow):
-            cards_row.addWidget(card)
-
-        root.addLayout(cards_row)
+        # ── Легенда ритмов (между графиками и заключением) ────────────────
+        root.addWidget(self._build_legend_widget())
 
         # ── Заключение ────────────────────────────────────────────────────
         self.conclusion_text = QTextEdit()
         self.conclusion_text.setReadOnly(True)
-        self.conclusion_text.setMaximumHeight(160)
         self.conclusion_text.setPlaceholderText(
             "Нажмите «Запустить анализ» для получения заключения..."
         )
@@ -110,9 +95,10 @@ class AnalysisTab(QWidget):
         self.psd_widget.setLogMode(y=True)
         self.psd_widget.setMinimumHeight(260)
 
-        # Цветные фоновые регионы ритмов
         for name, lo, hi in BAND_REGIONS:
             color = BAND_COLORS[name]
+
+            # Цветной фоновый регион
             region = pg.LinearRegionItem(
                 values=[lo, hi],
                 brush=pg.mkBrush(color + '28'),
@@ -121,15 +107,20 @@ class AnalysisTab(QWidget):
             region.setZValue(-10)
             self.psd_widget.addItem(region)
 
-            # Текстовая метка ритма
-            label = pg.InfLineLabel(
-                pg.InfiniteLine(pos=(lo + hi) / 2, angle=90, pen=None),
+            # Центральная линия с текстовой меткой (обе добавляются в plot)
+            center_line = pg.InfiniteLine(
+                pos=(lo + hi) / 2, angle=90, pen=None
+            )
+            pg.InfLineLabel(
+                center_line,
                 text=name,
                 position=0.95,
                 color=color,
                 fill=None,
             )
-            # Вертикальная линия-граница (правая граница каждого ритма)
+            self.psd_widget.addItem(center_line)  # label видна только так
+
+            # Граничная вертикальная линия
             boundary = pg.InfiniteLine(
                 pos=hi, angle=90,
                 pen=pg.mkPen(color, width=1, style=Qt.PenStyle.DashLine)
@@ -143,13 +134,35 @@ class AnalysisTab(QWidget):
 
     def _build_pie_widget(self):
         self._fig = Figure(facecolor='#1A1A1A')
-        self._fig.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
+        # Занимаем всю площадь фигуры — легенда теперь снаружи
+        self._fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02)
         self._ax = self._fig.add_subplot(111)
         self._canvas = FigureCanvasQTAgg(self._fig)
-        self._canvas.setMinimumWidth(260)
-        self._canvas.setMinimumHeight(260)
+        self._canvas.setMinimumWidth(220)
+        self._canvas.setMinimumHeight(220)
         self._draw_empty_pie()
         return self._canvas
+
+    def _build_legend_widget(self):
+        """Строка с цветными метками ритмов, видимая при любом размере."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(0)
+        layout.addStretch()
+
+        self._legend_labels: dict[str, QLabel] = {}
+        for i, (band, color) in enumerate(BAND_COLORS.items()):
+            lbl = QLabel(f"■  {band}  —")
+            lbl.setStyleSheet(
+                f"color: {color}; font-size: 12px; padding: 0 10px 0 0;"
+            )
+            lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+            self._legend_labels[band] = lbl
+            layout.addWidget(lbl)
+
+        layout.addStretch()
+        return container
 
     # ── Обработчик анализа ────────────────────────────────────────────────
 
@@ -166,15 +179,15 @@ class AnalysisTab(QWidget):
             )
             return
 
-        duration     = time[-1] - time[0]
-        freqs, psd   = compute_psd(signal, fs)
-        band_powers  = compute_band_powers(freqs, psd)
-        state        = compute_state_indices(band_powers)
-        conclusion   = generate_conclusion(band_powers, state, duration)
+        duration    = time[-1] - time[0]
+        freqs, psd  = compute_psd(signal, fs)
+        band_powers = compute_band_powers(freqs, psd)
+        state       = compute_state_indices(band_powers)
+        conclusion  = generate_conclusion(band_powers, state, duration)
 
         self._update_psd(freqs, psd)
         self._update_pie(band_powers)
-        self._update_cards(state)
+        self._update_legend(band_powers)
         self.conclusion_text.setPlainText(conclusion)
 
     # ── Обновление виджетов ───────────────────────────────────────────────
@@ -189,12 +202,12 @@ class AnalysisTab(QWidget):
         self._ax.set_facecolor('#1A1A1A')
         self._fig.patch.set_facecolor('#1A1A1A')
 
-        labels = list(band_powers.keys())
-        sizes  = [max(v, 0.01) for v in band_powers.values()]  # избегаем нулей
-        colors = [BAND_COLORS[k] for k in labels]
+        labels  = list(band_powers.keys())
+        sizes   = [max(v, 0.01) for v in band_powers.values()]
+        colors  = [BAND_COLORS[k] for k in labels]
         explode = [0.03] * len(labels)
 
-        wedges, texts, autotexts = self._ax.pie(
+        _, _, autotexts = self._ax.pie(
             sizes,
             labels=None,
             colors=colors,
@@ -205,25 +218,13 @@ class AnalysisTab(QWidget):
             wedgeprops={'linewidth': 1.0, 'edgecolor': '#1A1A1A'},
             textprops={'color': '#FFFFFF', 'fontsize': 9},
         )
-
-        # Легенда
-        legend_labels = [f"{k}  ({v:.1f}%)" for k, v in band_powers.items()]
-        self._ax.legend(
-            wedges, legend_labels,
-            loc='lower center',
-            bbox_to_anchor=(0.5, -0.18),
-            ncol=3,
-            fontsize=8,
-            framealpha=0,
-            labelcolor='#CCCCCC',
-        )
-
+        # Легенды внутри фигуры больше нет — она в _build_legend_widget
         self._canvas.draw()
 
-    def _update_cards(self, state):
-        self.card_relax.set_value(state['relaxation'])
-        self.card_conc.set_value(state['concentration'])
-        self.card_drow.set_value(state['drowsiness'])
+    def _update_legend(self, band_powers):
+        for band, pct in band_powers.items():
+            if band in self._legend_labels:
+                self._legend_labels[band].setText(f"■  {band}  {pct:.1f}%")
 
     def _draw_empty_pie(self):
         self._ax.clear()

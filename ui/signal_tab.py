@@ -2,6 +2,7 @@ import sys
 import os
 
 import numpy as np
+from scipy.signal import hilbert as scipy_hilbert
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QFrame, QMessageBox
@@ -17,6 +18,19 @@ from ui.widgets.filter_panel import FilterPanel
 from ui.widgets.signal_player import SignalPlayer
 
 
+# Цвета огибающих для каждой волны
+ENVELOPE_COLORS = {
+    'Delta':  '#6699EE',
+    'Theta':  '#BB88EE',
+    'Alpha':  '#66CC88',
+    'Mu':     '#88EEAA',
+    'Beta':   '#FFCC44',
+    'Gamma':  '#EE8866',
+    'Lambda': '#88BBEE',
+    'Kappa':  '#BB99EE',
+}
+
+
 class SignalTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,6 +38,7 @@ class SignalTab(QWidget):
         self.signal_raw = None      # исходный сигнал (не фильтрованный)
         self.signal_display = None  # отображаемый сигнал (может быть фильтрованным)
         self.fs = None
+        self._current_band = None   # название активной волны для огибающей
         self._build_ui()
 
     # ── Построение интерфейса ─────────────────────────────────────────────
@@ -61,6 +76,12 @@ class SignalTab(QWidget):
         self.plot_widget.setMinimumHeight(360)
 
         self.plot_curve = self.plot_widget.plot(pen=pg.mkPen('#00D47E', width=1))
+
+        # Огибающая выбранной волны
+        self.envelope_curve = self.plot_widget.plot(
+            pen=pg.mkPen('#FF8C00', width=2)
+        )
+        self.envelope_curve.setVisible(False)
 
         # Вертикальная линия текущей позиции плеера
         self.position_line = pg.InfiniteLine(
@@ -106,7 +127,8 @@ class SignalTab(QWidget):
 
     def _on_load(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Открыть CSV файл", "", "CSV файлы (*.csv);;Все файлы (*)"
+            self, "Открыть файл", "",
+            "CSV/текстовые файлы (*.csv *.txt *.dat);;Все файлы (*)"
         )
         if not path:
             return
@@ -117,7 +139,8 @@ class SignalTab(QWidget):
             QMessageBox.critical(
                 self, "Ошибка загрузки",
                 f"Не удалось прочитать файл:\n{e}\n\n"
-                "Убедитесь, что файл имеет формат CSV с разделителем ';'."
+                "Убедитесь, что файл содержит два числовых столбца\n"
+                "(время и сигнал), разделённых ';', Tab или пробелом."
             )
             return
 
@@ -131,6 +154,7 @@ class SignalTab(QWidget):
             )
 
         self.signal_display = self.signal_raw.copy()
+        self._current_band = None
 
         # Сброс фильтра без лишних пересчётов
         self.filter_panel.reset()
@@ -143,7 +167,9 @@ class SignalTab(QWidget):
         self._update_plot()
         self._update_info()
 
-    def _on_filter_changed(self, lowcut, highcut):
+    def _on_filter_changed(self, lowcut, highcut, band_name):
+        self._current_band = band_name
+
         if self.signal_raw is None:
             return
 
@@ -174,12 +200,33 @@ class SignalTab(QWidget):
         # Прореживание: не более 50 000 точек для плавной отрисовки
         if n > 50_000:
             step = n // 50_000
-            t = t[::step]
-            s = s[::step]
+            t_ds = t[::step]
+            s_ds = s[::step]
+        else:
+            t_ds = t
+            s_ds = s
 
-        self.plot_curve.setData(t, s)
-        self.plot_widget.setXRange(t[0], t[-1], padding=0.01)
-        self.plot_widget.setYRange(s.min(), s.max(), padding=0.05)
+        self.plot_curve.setData(t_ds, s_ds)
+        self.plot_widget.setXRange(t_ds[0], t_ds[-1], padding=0.01)
+        self.plot_widget.setYRange(s_ds.min(), s_ds.max(), padding=0.05)
+
+        # ── Огибающая ────────────────────────────────────────────────────
+        if self._current_band is not None and self.signal_display is not None:
+            color = ENVELOPE_COLORS.get(self._current_band, '#FF8C00')
+            self.envelope_curve.setPen(pg.mkPen(color, width=2))
+
+            # Вычисляем огибающую по полному сигналу, затем прореживаем
+            envelope = np.abs(scipy_hilbert(self.signal_display))
+            env_t = self.time
+            if len(env_t) > 50_000:
+                step = len(env_t) // 50_000
+                env_t = env_t[::step]
+                envelope = envelope[::step]
+
+            self.envelope_curve.setData(env_t, envelope)
+            self.envelope_curve.setVisible(True)
+        else:
+            self.envelope_curve.setVisible(False)
 
     def _update_info(self):
         duration = self.time[-1] - self.time[0]
